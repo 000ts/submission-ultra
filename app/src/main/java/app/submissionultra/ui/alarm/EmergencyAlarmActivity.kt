@@ -50,8 +50,12 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TileMode
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.withStyle
@@ -336,14 +340,34 @@ private val HazardStripeWidth = 24.dp
 /** ボタンは画面幅いっぱいには広げない。押し間違えない大きさを保ちつつ、数字を主役に残す。 */
 private const val ActionButtonWidthFraction = 0.62f
 
-/** 1 文字あたりの送り幅（em 比）。実測より気持ち広く見積もって、切れる側に倒さない。 */
-private const val MonospaceAdvance = 0.65f
+/**
+ * カウントダウンの書体。アプリ本文の Google Sans Code は使わない。
+ *
+ * あれはコードを読むための等幅書体で、`0` と `O` を見分けさせるために字を細く作り、
+ * その分を左右の余白に回している。送り幅 0.600em に対して字画は約 0.45em しかない。
+ * 文章としては読みやすいが、時計にすると数字と数字の間が空いて締まらない。
+ *
+ * 端末の標準書体に任せ、字間の指定も 0 にする（本文の 0.3sp を継いでいた）。
+ * 数字だけは tnum で等幅に揃え、ミリ秒が毎フレーム変わっても桁が横に踊らないようにする。
+ */
+private val CountdownStyle = TextStyle(
+    fontFamily = FontFamily.Default,
+    fontWeight = FontWeight.Bold,
+    letterSpacing = 0.sp,
+    fontFeatureSettings = "tnum",
+)
+
+/** 幅を実測するときの基準。表示には使わない。ここからの比で実際の大きさを決める。 */
+private val ReferenceSize = 40.sp
 
 /** ミリ秒は主の数字に対するこの比率で小さくする。 */
 private const val MillisSizeRatio = 0.35f
 
 /** 縦に収まらなくなるので、いくら幅があってもここまで。 */
 private const val MaxCountdownSize = 80f
+
+/** 逆に小さくなりすぎないための下限。ここを割るなら、切れてでも読める大きさを優先する。 */
+private const val MinCountdownSize = 24f
 
 @Composable
 private fun AlarmContent(
@@ -513,39 +537,89 @@ private fun Countdown(deadlineMillis: Long, now: Long, overdue: Boolean) {
     val seconds = (elapsedOrRemaining % 60_000L) / 1000L
     val millis = elapsedOrRemaining % 1000L
 
-    val main = if (hours > 0L) {
-        String.format("%d:%02d:%02d", hours, minutes, seconds)
-    } else {
-        String.format("%d:%02d", minutes, seconds)
+    // 精度そのものを段階にする。残りが詰まるほど細かく、そして短くなるので、
+    // 同じ幅に収めたときの文字が大きくなる。数字の見え方が状況の関数になる。
+    //
+    // 30 分残っている画面でミリ秒を 3 桁出しても、ストップウォッチにしか見えない。
+    // 細かさは、それが意味を持つところまで取っておく。
+    val main: String
+    val millisText: String
+    when {
+        hours > 0L -> {
+            main = String.format("%d:%02d:%02d", hours, minutes, seconds)
+            millisText = ""
+        }
+        minutes > 0L -> {
+            main = String.format("%d:%02d", minutes, seconds)
+            millisText = ""
+        }
+        else -> {
+            // 残り 1 分未満。分の桁を捨てて秒だけにし、小数第 1 位まで出す。
+            // 桁が減るぶん字が大きくなり、同時に動きが見えるようになる。
+            main = seconds.toString()
+            millisText = String.format(".%d", millis / 100L)
+        }
     }
-    val millisText = String.format(".%03d", millis)
+
+    val measurer = rememberTextMeasurer()
+    val density = LocalDensity.current
 
     BoxWithConstraints(
         modifier = Modifier.fillMaxWidth(),
         contentAlignment = Alignment.Center,
     ) {
-        // 等幅フォントなので、字数が決まれば必要な幅も決まる。固定サイズにすると
-        // 幅の狭い端末や桁の多い表示で切れるため、使える幅から入る最大の大きさを逆算する。
-        // 端末の文字サイズ設定（fontScale）も勘定に入れないと、大きく設定した人だけ溢れる。
-        val units = main.length + millisText.length * MillisSizeRatio
-        val fitted = maxWidth.value / (MonospaceAdvance * units * LocalDensity.current.fontScale)
-        val mainSize = fitted.coerceAtMost(MaxCountdownSize).sp
-        val millisSize = mainSize * MillisSizeRatio
+        // 入る大きさは推測せず実測する。
+        //
+        // 以前は「1 文字あたり 0.65em」という定数から逆算していたが、実際の送り幅は
+        // 0.60em で、8% 小さく描いていた。フォントを変えれば当然また合わなくなるし、
+        // ずれても画面を見ただけでは気づけない。基準の大きさで一度測って比を掛ければ、
+        // どのフォントでも、端末の文字サイズ設定がいくつでも、定数を直す必要がない。
+        //
+        // 測るのは実際の数字ではなく、同じ桁数で最も幅を食う "8" の並び。
+        // 数字ごとに幅が違うフォントでも、毎フレーム大きさが揺れることがなくなる。
+        val probe = remember(main.length, millisText.length) {
+            widestSample(main, millisText)
+        }
+        val fitted = remember(probe, maxWidth, density) {
+            val measured = measurer.measure(
+                text = probe,
+                style = CountdownStyle,
+                maxLines = 1,
+                softWrap = false,
+            )
+            val available = with(density) { maxWidth.toPx() }
+            // 幅 0 で割らない。この画面が落ちると誰も起きられないので、
+            // 計測が想定外の値を返しても表示だけは続ける。
+            val probeWidth = measured.size.width.coerceAtLeast(1)
+            (ReferenceSize.value * available / probeWidth)
+                .coerceIn(MinCountdownSize, MaxCountdownSize).sp
+        }
+        val millisSize = fitted * MillisSizeRatio
 
         Text(
             text = buildAnnotatedString {
-                withStyle(SpanStyle(fontSize = mainSize, fontWeight = FontWeight.Bold)) {
-                    append(main)
-                }
-                withStyle(SpanStyle(fontSize = millisSize, fontWeight = FontWeight.Bold)) {
-                    append(millisText)
-                }
+                withStyle(SpanStyle(fontSize = fitted)) { append(main) }
+                withStyle(SpanStyle(fontSize = millisSize)) { append(millisText) }
             },
+            style = CountdownStyle,
             // 画面で最も明るい要素にする。ここが一番でないと、大きさを足しても視線は来ない。
             color = AlarmNumber,
             textAlign = TextAlign.Center,
             maxLines = 1,
             softWrap = false,
         )
+    }
+}
+
+/**
+ * 同じ桁数で最も幅を食う見本。数字を全て "8" に置き換える。
+ *
+ * 実際の数字で測ると、桁が変わるたびに必要な幅が変わり、大きさが毎秒揺れる。
+ */
+private fun widestSample(main: String, millisText: String): AnnotatedString {
+    fun widen(s: String) = s.map { if (it.isDigit()) '8' else it }.joinToString("")
+    return buildAnnotatedString {
+        withStyle(SpanStyle(fontSize = ReferenceSize)) { append(widen(main)) }
+        withStyle(SpanStyle(fontSize = ReferenceSize * MillisSizeRatio)) { append(widen(millisText)) }
     }
 }
