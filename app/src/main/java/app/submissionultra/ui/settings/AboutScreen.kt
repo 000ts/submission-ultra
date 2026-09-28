@@ -60,7 +60,7 @@ private val AppIconRadius = 20.dp
 private const val LICENSE_NAME = "MIT License"
 
 /** 公開リポジトリ。ここから誰でもソースコードを読める。 */
-private const val REPOSITORY_URL = "https://github.com/tlarnc1-sl/submission-ultra"
+private const val REPOSITORY_URL = "https://github.com/000ts/submission-ultra"
 
 @Composable
 internal fun rememberAppInfo(): AppInfo? {
